@@ -426,6 +426,16 @@ layer parse_yolo(list *options, size_params params)
     fprintf(stderr, "[yolo] params: iou loss: %s (%d), iou_norm: %2.2f, cls_norm: %2.2f, scale_x_y: %2.2f\n",
         iou_loss, l.iou_loss, l.iou_normalizer, l.cls_normalizer, l.scale_x_y);
 
+    char *iou_thresh_kind_str = option_find_str_quiet(options, "iou_thresh_kind", "iou");
+    if (strcmp(iou_thresh_kind_str, "iou") == 0) l.iou_thresh_kind = IOU;
+    else if (strcmp(iou_thresh_kind_str, "giou") == 0) l.iou_thresh_kind = GIOU;
+    else if (strcmp(iou_thresh_kind_str, "diou") == 0) l.iou_thresh_kind = DIOU;
+    else if (strcmp(iou_thresh_kind_str, "ciou") == 0) l.iou_thresh_kind = CIOU;
+    else {
+        fprintf(stderr, " Wrong iou_thresh_kind = %s \n", iou_thresh_kind_str);
+        l.iou_thresh_kind = IOU;
+    }
+
     l.beta_nms = option_find_float_quiet(options, "beta_nms", 0.6);
     char *nms_kind = option_find_str_quiet(options, "nms_kind", "default");
     if (strcmp(nms_kind, "default") == 0) l.nms_kind = DEFAULT_NMS;
@@ -520,6 +530,16 @@ layer parse_gaussian_yolo(list *options, size_params params) // Gaussian_YOLOv3
     else if (strcmp(iou_loss, "diou") == 0) l.iou_loss = DIOU;
     else if (strcmp(iou_loss, "ciou") == 0) l.iou_loss = CIOU;
     else l.iou_loss = IOU;
+
+    char *iou_thresh_kind_str = option_find_str_quiet(options, "iou_thresh_kind", "iou");
+    if (strcmp(iou_thresh_kind_str, "iou") == 0) l.iou_thresh_kind = IOU;
+    else if (strcmp(iou_thresh_kind_str, "giou") == 0) l.iou_thresh_kind = GIOU;
+    else if (strcmp(iou_thresh_kind_str, "diou") == 0) l.iou_thresh_kind = DIOU;
+    else if (strcmp(iou_thresh_kind_str, "ciou") == 0) l.iou_thresh_kind = CIOU;
+    else {
+        fprintf(stderr, " Wrong iou_thresh_kind = %s \n", iou_thresh_kind_str);
+        l.iou_thresh_kind = IOU;
+    }
 
     l.beta_nms = option_find_float_quiet(options, "beta_nms", 0.6);
     char *nms_kind = option_find_str_quiet(options, "nms_kind", "default");
@@ -1086,7 +1106,8 @@ void parse_net_options(list *options, network *net)
     net->letter_box = option_find_int_quiet(options, "letter_box", 0);
     net->label_smooth_eps = option_find_float_quiet(options, "label_smooth_eps", 0.0f);
     net->resize_step = option_find_float_quiet(options, "resize_step", 32);
-    net->adversarial = option_find_int_quiet(options, "adversarial", 0);
+    net->attention = option_find_int_quiet(options, "attention", 0);
+    net->adversarial_lr = option_find_float_quiet(options, "adversarial_lr", 0);
 
     net->angle = option_find_float_quiet(options, "angle", 0);
     net->aspect = option_find_float_quiet(options, "aspect", 1);
@@ -1169,6 +1190,39 @@ int is_network(section *s)
             || strcmp(s->type, "[network]")==0);
 }
 
+void set_train_only_bn(network net)
+{
+    int train_only_bn = 0;
+    int i;
+    for (i = net.n - 1; i >= 0; --i) {
+        if (net.layers[i].train_only_bn) train_only_bn = net.layers[i].train_only_bn;  // set l.train_only_bn for all previous layers
+        if (train_only_bn) {
+            net.layers[i].train_only_bn = train_only_bn;
+
+            if (net.layers[i].type == CONV_LSTM) {
+                net.layers[i].wf->train_only_bn = train_only_bn;
+                net.layers[i].wi->train_only_bn = train_only_bn;
+                net.layers[i].wg->train_only_bn = train_only_bn;
+                net.layers[i].wo->train_only_bn = train_only_bn;
+                net.layers[i].uf->train_only_bn = train_only_bn;
+                net.layers[i].ui->train_only_bn = train_only_bn;
+                net.layers[i].ug->train_only_bn = train_only_bn;
+                net.layers[i].uo->train_only_bn = train_only_bn;
+                if (net.layers[i].peephole) {
+                    net.layers[i].vf->train_only_bn = train_only_bn;
+                    net.layers[i].vi->train_only_bn = train_only_bn;
+                    net.layers[i].vo->train_only_bn = train_only_bn;
+                }
+            }
+            else if (net.layers[i].type == CRNN) {
+                net.layers[i].input_layer->train_only_bn = train_only_bn;
+                net.layers[i].self_layer->train_only_bn = train_only_bn;
+                net.layers[i].output_layer->train_only_bn = train_only_bn;
+            }
+        }
+    }
+}
+
 network parse_network_cfg(char *filename)
 {
     return parse_network_cfg_custom(filename, 0, 0);
@@ -1213,10 +1267,15 @@ network parse_network_cfg_custom(char *filename, int batch, int time_steps)
     printf("mini_batch = %d, batch = %d, time_steps = %d, train = %d \n", net.batch, net.batch * net.subdivisions, net.time_steps, params.train);
 
     int avg_outputs = 0;
+    int avg_counter = 0;
     float bflops = 0;
     size_t workspace_size = 0;
     size_t max_inputs = 0;
     size_t max_outputs = 0;
+    int receptive_w = 1, receptive_h = 1;
+    int receptive_w_scale = 1, receptive_h_scale = 1;
+    const int show_receptive_field = option_find_float_quiet(options, "show_receptive_field", 0);
+
     n = n->next;
     int count = 0;
     free_section(s);
@@ -1331,6 +1390,58 @@ network parse_network_cfg_custom(char *filename, int batch, int time_steps)
             fprintf(stderr, "Type not recognized: %s\n", s->type);
         }
 
+        // calculate receptive field
+        if(show_receptive_field)
+        {
+            int dilation = max_val_cmp(1, l.dilation);
+            int stride = max_val_cmp(1, l.stride);
+            int size = max_val_cmp(1, l.size);
+
+            if (l.type == UPSAMPLE || (l.type == REORG))
+            {
+
+                l.receptive_w = receptive_w;
+                l.receptive_h = receptive_h;
+                l.receptive_w_scale = receptive_w_scale = receptive_w_scale / stride;
+                l.receptive_h_scale = receptive_h_scale = receptive_h_scale / stride;
+
+            }
+            else {
+                if (l.type == ROUTE) {
+                    receptive_w = receptive_h = receptive_w_scale = receptive_h_scale = 0;
+                    int k;
+                    for (k = 0; k < l.n; ++k) {
+                        layer route_l = net.layers[l.input_layers[k]];
+                        receptive_w = max_val_cmp(receptive_w, route_l.receptive_w);
+                        receptive_h = max_val_cmp(receptive_h, route_l.receptive_h);
+                        receptive_w_scale = max_val_cmp(receptive_w_scale, route_l.receptive_w_scale);
+                        receptive_h_scale = max_val_cmp(receptive_h_scale, route_l.receptive_h_scale);
+                    }
+                }
+                else
+                {
+                    int increase_receptive = size + (dilation - 1) * 2 - 1;// stride;
+                    increase_receptive = max_val_cmp(0, increase_receptive);
+
+                    receptive_w += increase_receptive * receptive_w_scale;
+                    receptive_h += increase_receptive * receptive_h_scale;
+                    receptive_w_scale *= stride;
+                    receptive_h_scale *= stride;
+                }
+
+                l.receptive_w = receptive_w;
+                l.receptive_h = receptive_h;
+                l.receptive_w_scale = receptive_w_scale;
+                l.receptive_h_scale = receptive_h_scale;
+            }
+            //printf(" size = %d, dilation = %d, stride = %d, receptive_w = %d, receptive_w_scale = %d - ", size, dilation, stride, receptive_w, receptive_w_scale);
+
+            int cur_receptive_w = receptive_w;
+            int cur_receptive_h = receptive_h;
+
+            fprintf(stderr, "%4d - receptive field: %d x %d \n", count, cur_receptive_w, cur_receptive_h);
+        }
+
 #ifdef GPU
         // futher GPU-memory optimization: net.optimized_memory == 2
         if (net.optimized_memory >= 2 && params.train && l.type != DROPOUT)
@@ -1372,6 +1483,7 @@ network parse_network_cfg_custom(char *filename, int batch, int time_steps)
         l.dont_update = option_find_int_quiet(options, "dont_update", 0);
         l.burnin_update = option_find_int_quiet(options, "burnin_update", 0);
         l.stopbackward = option_find_int_quiet(options, "stopbackward", 0);
+        l.train_only_bn = option_find_int_quiet(options, "train_only_bn", 0);
         l.dontload = option_find_int_quiet(options, "dontload", 0);
         l.dontloadscales = option_find_int_quiet(options, "dontloadscales", 0);
         l.learning_rate_scale = option_find_float_quiet(options, "learning_rate", 1);
@@ -1399,7 +1511,10 @@ network parse_network_cfg_custom(char *filename, int batch, int time_steps)
         }
         if (l.bflops > 0) bflops += l.bflops;
 
-        avg_outputs += l.outputs;
+        if (l.w > 1 && l.h > 1) {
+            avg_outputs += l.outputs;
+            avg_counter++;
+        }
     }
     free_list(sections);
 
@@ -1441,9 +1556,11 @@ network parse_network_cfg_custom(char *filename, int batch, int time_steps)
     }
 #endif
 
+    set_train_only_bn(net); // set l.train_only_bn for all required layers
+
     net.outputs = get_network_output_size(net);
     net.output = get_network_output(net);
-    avg_outputs = avg_outputs / count;
+    avg_outputs = avg_outputs / avg_counter;
     fprintf(stderr, "Total BFLOPS %5.3f \n", bflops);
     fprintf(stderr, "avg_outputs = %d \n", avg_outputs);
 #ifdef GPU
@@ -1646,7 +1763,7 @@ void save_weights_upto(network net, char *filename, int cutoff)
     fwrite(&major, sizeof(int), 1, fp);
     fwrite(&minor, sizeof(int), 1, fp);
     fwrite(&revision, sizeof(int), 1, fp);
-    //(*net.seen) = (*net.cur_iteration) * net.batch * net.subdivisions;
+    (*net.seen) = get_current_iteration(net) * net.batch * net.subdivisions; // remove this line, when you will save to weights-file both: seen & cur_iteration
     fwrite(net.seen, sizeof(uint64_t), 1, fp);
 
     int i;
