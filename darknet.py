@@ -31,6 +31,7 @@ from ctypes import *
 import math
 import random
 import os
+import cv2
 
 def sample(probs):
     s = sum(probs)
@@ -439,11 +440,13 @@ def performDetect(imagePath="data/dog.jpg", thresh= 0.25, configPath = "./cfg/yo
                 rr4, cc4 = draw.polygon_perimeter([x[1] for x in boundingBox], [x[0] + 1 for x in boundingBox], shape= shape)
                 rr5, cc5 = draw.polygon_perimeter([x[1] for x in boundingBox], [x[0] - 1 for x in boundingBox], shape= shape)
                 boxColor = (max([255, int(255 * (1 - ((1.5*confidence) ** 2)))]), max([255, int(255 * ((1.5*confidence) ** 2))]), 0)
-                draw.set_color(image, (rr, cc), boxColor, alpha= 0.8)
-                draw.set_color(image, (rr2, cc2), boxColor, alpha= 0.8)
-                draw.set_color(image, (rr3, cc3), boxColor, alpha= 0.8)
-                draw.set_color(image, (rr4, cc4), boxColor, alpha= 0.8)
-                draw.set_color(image, (rr5, cc5), boxColor, alpha= 0.8)
+                draw.set_color(image, (rr, cc), boxColor, alpha= 0.6)
+                draw.set_color(image, (rr2, cc2), boxColor, alpha= 0.6)
+                draw.set_color(image, (rr3, cc3), boxColor, alpha= 0.6)
+                draw.set_color(image, (rr4, cc4), boxColor, alpha= 0.6)
+                draw.set_color(image, (rr5, cc5), boxColor, alpha= 0.6)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                cv2.putText(image, str(np.rint(100 * confidence))+"%", (xCoord, yCoord-4), font, 0.6, boxColor, 1, cv2.LINE_AA)
             # if not makeImageOnly:
             #     io.imshow(image)
             #     io.show()
